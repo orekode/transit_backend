@@ -95,7 +95,7 @@ class TripAnalysisController extends Controller
         }
     }
 
-
+//i
     public function reward($data) {
         Log::info("reward data", [$data]);
 
