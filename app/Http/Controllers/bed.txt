@@ -1,0 +1,102 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
+
+class TrafficController extends Controller
+{
+    /**
+     * Check traffic conditions for a request
+     *
+     * @param array $validated Validated request data
+     * @param Carbon $createdAt Trip creation timestamp
+     * @param string|null $timestamp Request timestamp
+     * @return array
+     */
+    protected function checkTrafficConditions(array $validated, Carbon $createdAt, ?string $timestamp): array
+    {
+        $clientIp = request()->ip();
+        $regionCode = $this->getRegionFromIp($clientIp);
+
+        // Check if region is restricted via IP gateway
+        $gateway = DB::table('ip_gateways')
+            ->where('region_code', $regionCode)
+            ->first();
+
+        if (!$gateway) {
+            return [
+                'status' => 'allowed',
+                'message' => 'No restrictions for this region'
+            ];
+        }
+
+        // Check request count against threshold
+        $requestCount = DB::table('ip_access_logs')
+            ->where('region_code', $regionCode)
+            ->where('created_at', '>=', now()->subHour())
+            ->count();
+
+        if ($requestCount >= $gateway->threshold) {
+            \Log::warning('Traffic threshold exceeded', [
+                'ip' => $clientIp,
+                'region' => $regionCode,
+                'threshold' => $gateway->threshold
+            ]);
+
+            return [
+                'status' => 'restricted',
+                'message' => 'Regional request limit exceeded',
+                'http_status' => 429
+            ];
+        }
+
+        // Additional traffic condition checks (e.g., time-based or trip-specific)
+        $requestTime = $timestamp ? Carbon::parse($timestamp) : now();
+        $timeSinceTrip = $createdAt->diffInMinutes($requestTime);
+
+        if ($timeSinceTrip > 60) { // Example: Restrict if trip is older than 60 minutes
+            return [
+                'status' => 'restricted',
+                'message' => 'Trip data too old for processing',
+                'http_status' => 403
+            ];
+        }
+
+        // Log valid access
+        DB::table('ip_access_logs')->insert([
+            'ip_address' => $clientIp,
+            'region_code' => $regionCode,
+            'created_at' => now(),
+            'updated_at' => now()
+        ]);
+
+        return [
+            'status' => 'allowed',
+            'message' => 'Traffic conditions met'
+        ];
+    }
+
+    /**
+     * Get region code from IP using GeoIP2
+     *
+     * @param string $ip
+     * @return string
+     */
+    protected function getRegionFromIp(string $ip): string
+    {
+        try {
+            $reader = new \MaxMind\Db\Reader(storage_path('app/geoip/GeoLite2-City.mmdb'));
+            $geoData = $reader->city($ip);
+            return $geoData->country->isoCode ?? 'UNKNOWN';
+        } catch (\Exception $e) {
+            \Log::error('Failed to resolve IP region', [
+                'ip' => $ip,
+                'error' => $e->getMessage()
+            ]);
+            return 'UNKNOWN';
+        }
+    }
+}
